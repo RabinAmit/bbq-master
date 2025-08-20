@@ -13,6 +13,9 @@ export default function Home() {
           height={38}
           priority
         />
+        <div className="inline-block rounded-full bg-green-100 px-3 py-1 text-sm font-medium">
+          Tailwind OK
+        </div>
         <ol>
           <li>
             Get started by editing <code>app/page.tsx</code>.
