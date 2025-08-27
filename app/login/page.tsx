@@ -1,11 +1,22 @@
 "use client";
 import { supabase } from "@/lib/supabase-browser";
+import { useSearchParams } from "next/navigation";
 
 export default function LoginPage() {
+  const params = useSearchParams();
+  const from = params.get("from") || "/";
+
   const signInWithGoogle = async () => {
+    const origin = window.location.origin; // <- current environment (local or prod)
+    const redirectTo = `${origin}/auth/callback?from=${encodeURIComponent(from)}`;
+
+    console.log("OAuth redirectTo =", redirectTo); // debug line
+    // OPTIONAL: temporary toast/dialog to confirm; remove later if you want
+    // alert("redirectTo = " + redirectTo);
+
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${window.location.origin}/auth/callback` },
+      options: { redirectTo }, // Supabase must allow this in its Redirect URLs list
     });
     if (error) alert(error.message);
   };

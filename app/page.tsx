@@ -39,6 +39,12 @@ export default function Home() {
       {email ? (
         <div className="flex items-center gap-3">
           <span className="text-sm text-gray-600">Signed in as {email}</span>
+          {/* Below the signed-in status */}
+          <div>
+            <a href="/events/new" className="inline-block mt-2 rounded-lg border px-3 py-1 text-sm">
+              Create Event
+            </a>
+          </div>
           <button onClick={signOut} className="rounded-lg border px-3 py-1 text-sm">
             Sign out
           </button>

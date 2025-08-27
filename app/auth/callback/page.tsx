@@ -1,23 +1,21 @@
 "use client";
 import { useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase-browser"; // important: importing this triggers PKCE code processing
+import { useRouter, useSearchParams } from "next/navigation";
+import { supabase } from "@/lib/supabase-browser";
 
 export default function AuthCallback() {
   const router = useRouter();
+  const params = useSearchParams();
+  const from = params.get("from") || "/";
 
   useEffect(() => {
-    // Give supabase a tick to auto-exchange the ?code and persist the session
-    const run = async () => {
-      // Touch the client so tree-shaking can’t drop it, then verify session
-      await supabase.auth.getSession();
-      setTimeout(async () => {
-        const { data } = await supabase.auth.getSession();
-        router.replace(data.session ? "/" : "/login?error=session_missing");
-      }, 150);
-    };
-    run();
-  }, [router]);
+    // Supabase auto-exchanges the ?code when the client loads.
+    const t = setTimeout(async () => {
+      await supabase.auth.getSession(); // touch to ensure init ran
+      router.replace(from);
+    }, 150);
+    return () => clearTimeout(t);
+  }, [router, from]);
 
   return <main className="p-6">Finishing sign-in…</main>;
 }
