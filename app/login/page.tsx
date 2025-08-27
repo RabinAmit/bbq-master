@@ -1,22 +1,21 @@
 "use client";
+import { Suspense } from "react";
 import { supabase } from "@/lib/supabase-browser";
 import { useSearchParams } from "next/navigation";
 
-export default function LoginPage() {
+export const dynamic = "force-dynamic";
+
+function LoginInner() {
   const params = useSearchParams();
   const from = params.get("from") || "/";
 
   const signInWithGoogle = async () => {
-    const origin = window.location.origin; // <- current environment (local or prod)
+    const origin = window.location.origin; // local or prod, whichever you're on
     const redirectTo = `${origin}/auth/callback?from=${encodeURIComponent(from)}`;
-
-    console.log("OAuth redirectTo =", redirectTo); // debug line
-    // OPTIONAL: temporary toast/dialog to confirm; remove later if you want
-    // alert("redirectTo = " + redirectTo);
 
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo }, // Supabase must allow this in its Redirect URLs list
+      options: { redirectTo },
     });
     if (error) alert(error.message);
   };
@@ -33,5 +32,13 @@ export default function LoginPage() {
         </button>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<main className="p-6">Loading…</main>}>
+      <LoginInner />
+    </Suspense>
   );
 }
