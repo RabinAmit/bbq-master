@@ -3,18 +3,34 @@
 import { useEffect, useState, FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase-browser";
+import type { PostgrestError } from "@supabase/supabase-js";
 
 type DraftEvent = {
   title: string;
-  dateTime: string;
+  dateTime: string; // HTML datetime-local value
   location: string;
   description: string;
-  extrasCsv: string;
+  extrasCsv: string; // comma-separated
   timezone: string;
 };
 
+type InsertedEvent = { id: string; shareCode: string };
+
 function generateShareCode(len = 7) {
   return Math.random().toString(36).slice(2, 2 + len).toUpperCase();
+}
+
+function isPostgrestError(e: unknown): e is PostgrestError {
+  return !!e && typeof e === "object" && "code" in e && "message" in e;
+}
+
+function getErrorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
 }
 
 export default function NewEventPage() {
@@ -36,21 +52,19 @@ export default function NewEventPage() {
 
   useEffect(() => {
     (async () => {
-      try {
-        setStatus("checking-auth");
-        const { data, error } = await supabase.auth.getSession();
-        if (error) throw error;
-        if (!data.session) {
-          setStatus("redirecting");
-          router.replace("/login?from=/events/new");
-          return;
-        }
-        setStatus("authed");
-      } catch (e: any) {
-        console.error("Auth check failed:", e);
-        setError(e?.message ?? String(e));
+      setStatus("checking-auth");
+      const { data, error: authErr } = await supabase.auth.getSession();
+      if (authErr) {
+        setError(authErr.message);
         setStatus("error");
+        return;
       }
+      if (!data.session) {
+        setStatus("redirecting");
+        router.replace("/login?from=/events/new");
+        return;
+      }
+      setStatus("authed");
     })();
   }, [router]);
 
@@ -59,22 +73,24 @@ export default function NewEventPage() {
     (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
       setDraft((d) => ({ ...d, [key]: e.target.value }));
 
-  const ensureUserRow = async () => {
+  async function ensureUserRow(): Promise<{ id: string; email: string }> {
     const { data: u } = await supabase.auth.getUser();
     if (!u?.user?.email) throw new Error("Not signed in");
+
     const email = u.user.email;
-    const name = (u.user.user_metadata?.full_name as string) || null;
-    const imageUrl = (u.user.user_metadata?.avatar_url as string) || null;
+    const name = (u.user.user_metadata?.full_name as string | undefined) ?? null;
+    const imageUrl = (u.user.user_metadata?.avatar_url as string | undefined) ?? null;
 
     const { data, error } = await supabase
-      .from("users")
-      .upsert({ email, name, imageUrl }, { onConflict: "email" })
-      .select("id, email")
-      .single();
+  .from("users")
+  .upsert({ email, name, imageUrl }, { onConflict: "email" })
+  .select("id, email")
+  .single() as unknown as { data: { id: string; email: string }; error: PostgrestError | null };
+
 
     if (error) throw error;
-    return data as { id: string; email: string };
-  };
+    return data;
+  }
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -86,10 +102,12 @@ export default function NewEventPage() {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
+
       const dateTimeIso = new Date(draft.dateTime).toISOString();
 
-      let created: { id: string; shareCode: string } | null = null;
+      let created: InsertedEvent | null = null;
       let tries = 0;
+      let lastErr: PostgrestError | null = null;
 
       while (!created && tries < 5) {
         const code = generateShareCode();
@@ -105,34 +123,40 @@ export default function NewEventPage() {
             extras,
             shareCode: code,
           })
-          .select("id, shareCode")
-          .single();
+  .select("id, shareCode")
+  .single() as unknown as { data: InsertedEvent; error: PostgrestError | null };
+
 
         if (!error && data) {
-          created = data as { id: string; shareCode: string };
-        } else if ((error as any)?.code === "23505") {
+          created = data;
+        } else if (error && isPostgrestError(error) && error.code === "23505") {
+          // unique violation on shareCode
           tries++;
+          lastErr = error;
         } else if (error) {
           throw error;
         }
       }
 
-      if (!created) throw new Error("Could not create event after retries.");
-      setStatus("saved");
-      // alert(`Event created!\n\nShare code: ${created.shareCode}`);
+      if (!created) throw lastErr ?? new Error("Could not create event");
+
+      // Success: go to the event’s public page
       router.replace(`/e/${created.shareCode}`);
-    } catch (e: any) {
-      console.error("Save failed:", e);
-      setError(e?.message ?? String(e));
+    } catch (e: unknown) {
+      const msg = getErrorMessage(e);
+      console.error(e);
+      setError(msg);
       setStatus("error");
+      alert("Failed to create event: " + msg);
     }
   };
 
-  // Always show status so we don't get a blank screen
   if (status !== "authed") {
     return (
       <main className="p-6 space-y-2">
-        <div className="text-sm">status: <b>{status}</b></div>
+        <div className="text-sm">
+          status: <b>{status}</b>
+        </div>
         {error && <pre className="text-sm text-red-600 whitespace-pre-wrap">{error}</pre>}
       </main>
     );
@@ -142,9 +166,7 @@ export default function NewEventPage() {
     <main className="max-w-2xl mx-auto p-6 space-y-6">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold">Create Event</h1>
-        <p className="text-sm text-gray-500">
-          Timezone: <span className="font-mono">{tz}</span>
-        </p>
+        <p className="text-sm text-gray-500">Timezone: <span className="font-mono">{tz}</span></p>
       </header>
 
       <form className="space-y-4" onSubmit={onSubmit}>

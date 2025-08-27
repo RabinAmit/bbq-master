@@ -3,13 +3,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase-browser";
+import type { PostgrestError } from "@supabase/supabase-js";
 
 type EventRow = {
   id: string;
   hostId: string;
   title: string;
   description: string | null;
-  dateTime: string;
+  dateTime: string;     // ISO
   timezone: string;
   location: string | null;
   extras: string[] | null;
@@ -33,6 +34,15 @@ const DEFAULT_LABELS = {
   NO: "No. I'm just a crappy friend",
 };
 
+function getErrorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
 export default function EventViewPage() {
   const router = useRouter();
   const { code } = useParams<{ code: string }>();
@@ -45,32 +55,27 @@ export default function EventViewPage() {
   // RSVP form state
   const [status, setStatus] = useState<RsvpRow["status"] | "">("");
   const [note, setNote] = useState("");
-  const [family, setFamily] = useState<Array<{ name: string; adult: boolean }>>(
-    []
-  );
+  const [family, setFamily] = useState<Array<{ name: string; adult: boolean }>>([]);
   const [willBringText, setWillBringText] = useState("");
 
   const shareUrl = useMemo(
-    () =>
-      typeof window !== "undefined" ? `${window.location.origin}/e/${code}` : "",
+    () => (typeof window !== "undefined" ? `${window.location.origin}/e/${code}` : ""),
     [code]
   );
 
   useEffect(() => {
-    // Load the event by shareCode
     (async () => {
       const { data } = await supabase
         .from("events")
         .select("*")
         .eq("shareCode", code)
-        .single();
-      setEvent((data as EventRow) || null);
+        .single() as unknown as { data: EventRow | null };
+      setEvent(data ?? null);
       setLoading(false);
     })();
   }, [code]);
 
   useEffect(() => {
-    // Watch auth and cache email
     const init = async () => {
       const { data } = await supabase.auth.getUser();
       setEmail(data.user?.email ?? null);
@@ -83,51 +88,35 @@ export default function EventViewPage() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  async function ensureUserRow() {
-    const { data: u } = await supabase.auth.getUser();
-    if (!u?.user?.email) throw new Error("Please sign in to RSVP.");
-    const email = u.user.email;
-    const name = (u.user.user_metadata?.full_name as string) || null;
-    const imageUrl = (u.user.user_metadata?.avatar_url as string) || null;
-
-    const { data, error } = await supabase
-      .from("users")
-      .upsert({ email, name, imageUrl }, { onConflict: "email" })
-      .select("id")
-      .single();
-    if (error) throw error;
-    setUserId(data.id);
-    return data.id as string;
-  }
-
-  // If logged in and we know event id + user id, load existing RSVP to prefill
+  // Prefill RSVP if it exists
   useEffect(() => {
     (async () => {
       if (!event) return;
       const { data: u } = await supabase.auth.getUser();
       if (!u.user?.email) return;
 
-      // ensure we know userId (and create user row if needed)
-      const { data: userRow, error: ue } = await supabase
+      const { data: userRow } = await supabase
         .from("users")
         .select("id")
         .eq("email", u.user.email!)
-        .single();
-      if (ue) return; // user row might not exist yet; will be created on save
-      setUserId(userRow?.id ?? null);
+        .maybeSingle() as unknown as { data: { id: string } | null };
+
+      if (!userRow) return;
+      setUserId(userRow.id);
 
       const { data: r } = await supabase
         .from("rsvps")
         .select("*")
         .eq("eventId", event.id)
         .eq("userId", userRow.id)
-        .maybeSingle();
+        .maybeSingle() as unknown as { data: RsvpRow | null };
+
 
       if (r) {
-        setStatus((r.status as RsvpRow["status"]) ?? "");
+        setStatus(r.status ?? "");
         setNote(r.note ?? "");
-        setFamily((r.familyJson as any) ?? []);
-        setWillBringText(((r.willBringJson as any) ?? []).join(", "));
+        setFamily(r.familyJson ?? []);
+        setWillBringText((r.willBringJson ?? []).join(", "));
       }
     })();
   }, [event]);
@@ -136,10 +125,7 @@ export default function EventViewPage() {
   if (!event) return <main className="p-6">Event not found.</main>;
 
   const dt = new Date(event.dateTime);
-  const whenLocal = dt.toLocaleString(undefined, {
-    dateStyle: "full",
-    timeStyle: "short",
-  });
+  const whenLocal = dt.toLocaleString(undefined, { dateStyle: "full", timeStyle: "short" });
 
   const signIn = () => {
     router.push(`/login?from=/e/${event.shareCode}`);
@@ -155,18 +141,48 @@ export default function EventViewPage() {
   };
 
   const addMember = () => setFamily((arr) => [...arr, { name: "", adult: true }]);
-  const updateMember =
-    (i: number, key: "name" | "adult") =>
+
+  const updateMemberName =
+    (i: number) =>
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setFamily((arr) => {
         const next = arr.slice();
-        // @ts-ignore
-        next[i][key] = key === "adult" ? e.target.checked : e.target.value;
+        const current = next[i] || { name: "", adult: true };
+        next[i] = { ...current, name: e.target.value };
         return next;
       });
     };
-  const removeMember = (i: number) =>
-    setFamily((arr) => arr.filter((_, idx) => idx !== i));
+
+  const updateMemberAdult =
+    (i: number) =>
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setFamily((arr) => {
+        const next = arr.slice();
+        const current = next[i] || { name: "", adult: true };
+        next[i] = { ...current, adult: e.target.checked };
+        return next;
+      });
+    };
+
+  const removeMember = (i: number) => setFamily((arr) => arr.filter((_, idx) => idx !== i));
+
+  async function ensureUserRow(): Promise<string> {
+    const { data: u } = await supabase.auth.getUser();
+    if (!u?.user?.email) throw new Error("Please sign in to RSVP.");
+    const emailVal = u.user.email;
+    const name = (u.user.user_metadata?.full_name as string | undefined) ?? null;
+    const imageUrl = (u.user.user_metadata?.avatar_url as string | undefined) ?? null;
+
+    const { data, error } = await supabase
+      .from("users")
+      .upsert({ email: emailVal, name, imageUrl }, { onConflict: "email" })
+      .select("id")
+      .single() as unknown as { data: { id: string }; error: PostgrestError | null };
+
+    if (error) throw error;
+    setUserId(data.id);
+    return data.id;
+  }
 
   const saveRsvp = async () => {
     try {
@@ -183,30 +199,24 @@ export default function EventViewPage() {
       const { error } = await supabase
         .from("rsvps")
         .upsert(
-          {
-            eventId: event.id,
-            userId: uid,
-            status,
-            note: note || null,
-            familyJson: family,
-            willBringJson: bring,
-          },
+          { /* ... */ },
           { onConflict: "eventId,userId" }
         )
         .select("*")
         .single();
 
+
       if (error) throw error;
       alert("RSVP saved. Thanks!");
-    } catch (e: any) {
+    } catch (e: unknown) {
+      const msg = getErrorMessage(e);
       console.error(e);
-      alert("Could not save RSVP: " + (e?.message || String(e)));
+      alert("Could not save RSVP: " + msg);
     }
   };
 
   return (
     <main className="max-w-2xl mx-auto p-6 space-y-6">
-      {/* Header */}
       <header className="space-y-2">
         <h1 className="text-2xl font-semibold">{event.title}</h1>
         <p className="text-sm text-gray-600">{whenLocal}</p>
@@ -230,13 +240,11 @@ export default function EventViewPage() {
         </div>
       </header>
 
-      {/* RSVP */}
       <section className="rounded-lg border p-4 space-y-4">
         <h2 className="font-medium">RSVP</h2>
 
         {email ? (
           <>
-            {/* RSVP options */}
             <div className="grid gap-2">
               {(
                 [
@@ -259,7 +267,6 @@ export default function EventViewPage() {
               ))}
             </div>
 
-            {/* Special requests */}
             <div className="space-y-1">
               <label className="text-sm font-medium">Special requests</label>
               <input
@@ -270,45 +277,32 @@ export default function EventViewPage() {
               />
             </div>
 
-            {/* Family members */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-sm font-medium">Family members</label>
-                <button
-                  type="button"
-                  onClick={addMember}
-                  className="rounded border px-2 py-1 text-xs"
-                >
+                <button type="button" onClick={addMember} className="rounded border px-2 py-1 text-xs">
                   + Add member
                 </button>
               </div>
+
               {family.length === 0 && (
-                <p className="text-xs text-gray-500">
-                  Add adults/kids coming with you (optional).
-                </p>
+                <p className="text-xs text-gray-500">Add adults/kids coming with you (optional).</p>
               )}
+
               <div className="space-y-2">
                 {family.map((m, i) => (
                   <div key={i} className="grid grid-cols-[1fr_auto_auto] items-center gap-2">
                     <input
                       placeholder="Name"
                       value={m.name}
-                      onChange={updateMember(i, "name")}
+                      onChange={updateMemberName(i)}
                       className="rounded-md border px-3 py-2"
                     />
                     <label className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={m.adult}
-                        onChange={updateMember(i, "adult")}
-                      />
+                      <input type="checkbox" checked={m.adult} onChange={updateMemberAdult(i)} />
                       Adult
                     </label>
-                    <button
-                      type="button"
-                      onClick={() => removeMember(i)}
-                      className="text-xs text-red-600"
-                    >
+                    <button type="button" onClick={() => removeMember(i)} className="text-xs text-red-600">
                       remove
                     </button>
                   </div>
@@ -316,7 +310,6 @@ export default function EventViewPage() {
               </div>
             </div>
 
-            {/* Will bring */}
             <div className="space-y-1">
               <label className="text-sm font-medium">I’ll bring (comma-separated)</label>
               <input
@@ -334,9 +327,7 @@ export default function EventViewPage() {
             </div>
           </>
         ) : (
-          <p className="text-sm text-gray-600">
-            Please sign in to RSVP.
-          </p>
+          <p className="text-sm text-gray-600">Please sign in to RSVP.</p>
         )}
       </section>
     </main>
